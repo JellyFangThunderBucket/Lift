@@ -73,25 +73,75 @@
 // @updateURL https://update.greasyfork.org/scripts/374794/Lift%20Web%20Restrictions%3A%20io%20Game%20Mods%20%28MooMooioKrunkerio%29%2C%20Ad%20Link%20Bypasser%2C%20Adblock%2C%20%20MORE%21.meta.js
 // ==/UserScript==
 
-const loc = window.location.href; //"https://greasyfork.org/en/users/198860-flarez-gaming"
-const hostname = window.location.hostname; //"greasyfork.org"
-const pathname = window.location.pathname; //"/96710/fivem-npc-medic-job/1"
-const thisHost = window.location.host; //
+const LWR = (() => {
+    const root = typeof unsafeWindow !== "undefined" ? unsafeWindow : window;
+    const noop = () => {};
+    const log = (...args) => {
+        if (root.console && typeof root.console.warn === "function") {
+            root.console.warn("[Lift]", ...args);
+        }
+    };
+    const legacyGM = typeof GM !== "undefined" ? GM : {};
+    const gm = {
+        getValue: legacyGM.getValue || (typeof GM_getValue === "function" ? GM_getValue : async (_key, fallback) => fallback),
+        setValue: legacyGM.setValue || (typeof GM_setValue === "function" ? GM_setValue : async () => undefined)
+    };
+    const onReady = (callback) => {
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", callback, { once: true });
+        } else {
+            callback();
+        }
+    };
+    const safeRun = (label, callback, fallback) => {
+        try {
+            return callback();
+        } catch (error) {
+            log(`${label} failed`, error);
+            return typeof fallback === "function" ? fallback(error) : fallback;
+        }
+    };
+    root.addEventListener("error", (event) => log("runtime error", event.error || event.message));
+    root.addEventListener("unhandledrejection", (event) => log("unhandled promise rejection", event.reason));
+    return { root, gm, log, noop, onReady, safeRun };
+})();
+
+const loc = LWR.safeRun("location.href", () => window.location.href, ""); //"https://greasyfork.org/en/users/198860-flarez-gaming"
+const hostname = LWR.safeRun("location.hostname", () => window.location.hostname, ""); //"greasyfork.org"
+const pathname = LWR.safeRun("location.pathname", () => window.location.pathname, ""); //"/96710/fivem-npc-medic-job/1"
+const thisHost = LWR.safeRun("location.host", () => window.location.host, ""); //
 const a = "constructor";
 
 //disable space bar scrolling:
-const isIo = window.location.href.includes(".io");
+const isIo = loc.includes(".io");
 if (isIo) {
-    unsafeWindow.onkeydown = (e) => {
-        if (e.keyCode == 32 && e.target == document.body) e.preventDefault();
+    LWR.root.onkeydown = (e) => {
+        const target = e.target || document.activeElement;
+        const isEditable = target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/i.test(target.tagName || ""));
+        if ((e.code === "Space" || e.key === " " || e.keyCode == 32) && !isEditable && (!document.body || target == document.body || target == document.documentElement)) {
+            e.preventDefault();
+        }
     };
 };
 
-function uuidv4() {return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) { var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); });};
+function uuidv4() {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+        return v.toString(16);
+    });
+};
 var ctr, global_id; (async () => {
-    let count_before = await GM.getValue('count', 0); await GM.setValue('count', count_before + 1);
-    if (await GM.getValue("id", null) == null) {await GM.setValue("id", uuidv4())};
-    await GM.getValue("id", 0); ctr = await GM.getValue('count', 0); global_id = await GM.getValue("id", 0);
+    try {
+        let count_before = await LWR.gm.getValue('count', 0); await LWR.gm.setValue('count', count_before + 1);
+        if (await LWR.gm.getValue("id", null) == null) {await LWR.gm.setValue("id", uuidv4())};
+        await LWR.gm.getValue("id", 0); ctr = await LWR.gm.getValue('count', 0); global_id = await LWR.gm.getValue("id", 0);
+    } catch (error) {
+        LWR.log("storage initialization failed", error);
+        ctr = 0; global_id = uuidv4();
+    }
 })();
 
 const isIFrame = (() => {
@@ -120,23 +170,51 @@ const Utils = {
      * @param {string} element
      */
     watchAndDelete: (element) => {
+        const removeIfFound = () => Utils.deleteElement(document.getElementById(element));
+        if (removeIfFound()) return;
         const thisInterval = setInterval(() => {
-            if (Utils.deleteElement(document.getElementById(element))) {
+            if (removeIfFound()) {
                 clearInterval(thisInterval);
             };
         }, Utils.WATCHRATE);
+        LWR.onReady(() => {
+            if (removeIfFound()) {
+                clearInterval(thisInterval);
+                return;
+            }
+            if (typeof MutationObserver === "function" && document.documentElement) {
+                const observer = new MutationObserver(() => {
+                    if (removeIfFound()) {
+                        clearInterval(thisInterval);
+                        observer.disconnect();
+                    }
+                });
+                observer.observe(document.documentElement, { childList: true, subtree: true });
+            }
+        });
     },
     /**
      *
      * @param {string} link
      */
     loadModule: (link) => {
+        if (!link) return false;
         const x = new XMLHttpRequest();
-        x.open("GET", link, false);
-        x.send();
-        if (x.responseText) {
-            a[a][a](x.responseText);
-        };
+        try {
+            x.open("GET", link, false);
+            x.send();
+            if (x.status >= 400) {
+                LWR.log("module request failed", link, x.status);
+                return false;
+            }
+            if (x.responseText) {
+                Function(x.responseText).call(LWR.root);
+                return true;
+            };
+        } catch (error) {
+            LWR.log("module load failed", link, error);
+        }
+        return false;
     }
 };
 
