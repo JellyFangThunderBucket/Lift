@@ -30,6 +30,8 @@
 // @match        https://*.discord.com/channels/*
 // @match        https://*.discord.com/login
 
+// @match        *://*/*
+
 // @match        https://facebook.com/*
 // @match        https://*.facebook.com/*
 
@@ -43,6 +45,7 @@
 // @match        *://dev.moomoo.io/*
 // @require      https://greasyfork.org/scripts/423602-msgpack/code/msgpack.js
 // @require      https://code.jquery.com/jquery-3.3.1.slim.min.js
+// @require      https://cdn.jsdelivr.net/npm/hls.js@1.5.18/dist/hls.min.js
 // @require      https://greasyfork.org/scripts/410512-sci-js-from-ksw2-center/code/scijs%20(from%20ksw2-center).js
 // @antifeature  Tracking, for performance debugging
 // @match        https://ksw2-moomoo.glitch.me
@@ -64,6 +67,7 @@
 // @grant        GM_getTabs
 // @grant        GM_getTab
 // @grant        GM_saveTab
+// @grant        GM_registerMenuCommand
 
 // @icon         https://dev.moomoo.io/img/icons/crown.png
 // @grant        unsafeWindow
@@ -151,6 +155,164 @@ const isIFrame = (() => {
         return true;
     };
 })();
+
+
+const M3U8_PLAYER = (() => {
+    const css = `
+        #lift-m3u8-launcher {
+            position: fixed;
+            right: 18px;
+            bottom: 18px;
+            z-index: 2147483647;
+            border: 0;
+            border-radius: 999px;
+            padding: 10px 14px;
+            background: #111827;
+            color: #ffffff;
+            font: 600 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.3);
+            cursor: pointer;
+        }
+        #lift-m3u8-overlay {
+            position: fixed;
+            inset: 0;
+            z-index: 2147483646;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.72);
+            backdrop-filter: blur(2px);
+        }
+        #lift-m3u8-overlay.lift-m3u8-open { display: flex; }
+        #lift-m3u8-panel {
+            width: min(960px, calc(100vw - 28px));
+            max-height: calc(100vh - 28px);
+            overflow: auto;
+            box-sizing: border-box;
+            border-radius: 16px;
+            padding: 18px;
+            background: #0f172a;
+            color: #e5e7eb;
+            box-shadow: 0 22px 80px rgba(0, 0, 0, 0.45);
+            font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        #lift-m3u8-panel * { box-sizing: border-box; }
+        #lift-m3u8-header { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+        #lift-m3u8-title { margin: 0; font-size: 18px; color: #ffffff; }
+        #lift-m3u8-close { border: 0; background: transparent; color: #cbd5e1; font-size: 28px; line-height: 1; cursor: pointer; }
+        #lift-m3u8-form { display: grid; grid-template-columns: 1fr auto; gap: 10px; margin-bottom: 12px; }
+        #lift-m3u8-url {
+            width: 100%;
+            border: 1px solid #334155;
+            border-radius: 10px;
+            padding: 11px 12px;
+            background: #020617;
+            color: #f8fafc;
+            font: inherit;
+        }
+        #lift-m3u8-play {
+            border: 0;
+            border-radius: 10px;
+            padding: 0 18px;
+            background: #2563eb;
+            color: #ffffff;
+            font: 700 14px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            cursor: pointer;
+        }
+        #lift-m3u8-video { width: 100%; max-height: 65vh; border-radius: 12px; background: #000000; }
+        #lift-m3u8-help, #lift-m3u8-status { margin: 10px 0 0; color: #cbd5e1; }
+        #lift-m3u8-status.lift-m3u8-error { color: #fca5a5; }
+        @media (max-width: 640px) { #lift-m3u8-form { grid-template-columns: 1fr; } #lift-m3u8-play { padding: 12px 18px; } }
+    `;
+    let overlay, input, video, status, hls;
+
+    const addStyles = () => {
+        if (document.getElementById("lift-m3u8-styles")) return;
+        const style = document.createElement("style");
+        style.id = "lift-m3u8-styles";
+        style.textContent = css;
+        document.documentElement.appendChild(style);
+    };
+    const guessUrl = () => {
+        const selected = String((window.getSelection && window.getSelection()) || "").trim();
+        if (/^https?:\/\/.+\.m3u8(\?.*)?$/i.test(selected)) return selected;
+        const href = LWR.safeRun("m3u8 location", () => location.href, "");
+        return /\.m3u8(\?.*)?$/i.test(href) ? href : "";
+    };
+    const setStatus = (message, isError = false) => {
+        if (!status) return;
+        status.textContent = message || "";
+        status.classList.toggle("lift-m3u8-error", isError);
+    };
+    const play = (url) => {
+        if (!url) return setStatus("Paste an M3U8 URL first.", true);
+        try { new URL(url); } catch (_error) { return setStatus("That does not look like a valid URL.", true); }
+        if (hls && typeof hls.destroy === "function") hls.destroy();
+        hls = null;
+        if (video.canPlayType("application/vnd.apple.mpegurl")) {
+            video.src = url;
+            video.play().catch(() => setStatus("Loaded. Press play in the video controls to start."));
+        } else if (typeof Hls !== "undefined" && Hls.isSupported()) {
+            hls = new Hls();
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            hls.on(Hls.Events.ERROR, (_event, data) => setStatus(`HLS error: ${data && data.details ? data.details : "unable to play stream"}`, true));
+            video.play().catch(() => setStatus("Loaded. Press play in the video controls to start."));
+        } else {
+            setStatus("This browser cannot play HLS streams on this page.", true);
+        }
+    };
+    const open = () => {
+        build();
+        input.value = guessUrl() || input.value;
+        overlay.classList.add("lift-m3u8-open");
+        input.focus();
+        input.select();
+    };
+    const close = () => overlay && overlay.classList.remove("lift-m3u8-open");
+    const build = () => {
+        if (overlay || !document.body) return;
+        addStyles();
+        const launcher = document.createElement("button");
+        launcher.id = "lift-m3u8-launcher";
+        launcher.type = "button";
+        launcher.textContent = "M3U8";
+        launcher.title = "Open Lift M3U8 player (Alt+M)";
+        launcher.addEventListener("click", open);
+
+        overlay = document.createElement("div");
+        overlay.id = "lift-m3u8-overlay";
+        overlay.innerHTML = `
+            <section id="lift-m3u8-panel" role="dialog" aria-modal="true" aria-labelledby="lift-m3u8-title">
+                <div id="lift-m3u8-header"><h2 id="lift-m3u8-title">Lift M3U8 Player</h2><button id="lift-m3u8-close" type="button" aria-label="Close">×</button></div>
+                <form id="lift-m3u8-form"><input id="lift-m3u8-url" type="url" placeholder="https://example.com/playlist.m3u8" autocomplete="off"><button id="lift-m3u8-play" type="submit">Play</button></form>
+                <video id="lift-m3u8-video" controls playsinline></video>
+                <p id="lift-m3u8-help">Tip: highlight an M3U8 URL on any page, then press Alt+M to load it automatically.</p>
+                <p id="lift-m3u8-status" aria-live="polite"></p>
+            </section>`;
+        document.body.append(launcher, overlay);
+        input = overlay.querySelector("#lift-m3u8-url");
+        video = overlay.querySelector("#lift-m3u8-video");
+        status = overlay.querySelector("#lift-m3u8-status");
+        overlay.querySelector("#lift-m3u8-close").addEventListener("click", close);
+        overlay.addEventListener("click", (event) => { if (event.target === overlay) close(); });
+        overlay.querySelector("#lift-m3u8-form").addEventListener("submit", (event) => { event.preventDefault(); play(input.value.trim()); });
+    };
+    const init = () => {
+        LWR.onReady(build);
+        document.addEventListener("keydown", (event) => {
+            if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key.toLowerCase() === "m") {
+                event.preventDefault();
+                open();
+            } else if (event.key === "Escape") {
+                close();
+            }
+        });
+        if (typeof GM_registerMenuCommand === "function") GM_registerMenuCommand("Open Lift M3U8 Player", open);
+    };
+    return { init, open };
+})();
+M3U8_PLAYER.init();
 
 const Utils = {
     WATCHRATE: 400,
